@@ -21,7 +21,7 @@ inline constexpr std::size_t kPreparedVisionPatchFeatures = 3ULL * 2ULL * 16ULL 
 inline constexpr std::uint64_t kRawPatchesPerVisionToken  = 4;
 // Aggregate prompt capacity and one-item execution capacity are intentionally distinct. Multiple
 // media items are retained by one prepared prompt but pass through the Vision tower sequentially.
-inline constexpr std::uint64_t kMaximumPromptVisionTokens = 32'768;
+inline constexpr std::uint64_t kMaximumPromptVisionTokens = 262'144;
 inline constexpr std::uint64_t kMaximumPromptVisionRawPatches =
     kMaximumPromptVisionTokens * kRawPatchesPerVisionToken;
 inline constexpr std::uint64_t kMaximumVisionItemTokens = 16'384;
