@@ -10,6 +10,9 @@ void q4_linear_swiglu_gemv_pair_launch(const Tensor& x, const Weight& w, Tensor&
                                        cudaStream_t stream);
 void q4_linear_swiglu_mma_split_half_pair_r32_c128_launch(const Tensor& x, const Weight& w,
                                                           Tensor& out, cudaStream_t stream);
+void q4_linear_swiglu_mma_split_half_pair_r32_c128_i8_launch(const Tensor& x_q,
+                                                         const Tensor& x_scale, const Weight& w,
+                                                         Tensor& out, cudaStream_t stream);
 void q4_linear_swiglu_mma_split_half_pair_r32_c40_launch(const Tensor& x, const Weight& w,
                                                          Tensor& out, cudaStream_t stream);
 void q4_linear_swiglu_mma_split_half_pair_r32_c48_launch(const Tensor& x, const Weight& w,

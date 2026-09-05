@@ -3,6 +3,7 @@
 #include "core/device.h"
 #include "ops/common/math.h"
 #include "ops/common/rowsplit_grouped_mma.cuh"
+#include "ops/common/rowsplit_grouped_mma_i8.cuh"
 #include "ops/common/token_slices.h"
 
 #include <cstdint>
@@ -62,7 +63,54 @@ void launch_slice(bool full, const Tensor& x, const Weight& qk_weight, const Wei
     CUDA_CHECK(cudaGetLastError());
 }
 
+void launch_slice_i8(bool full, const Tensor& x_q, const Tensor& x_scale,
+                     const Weight& qk_weight, const Weight& value_z_weight, Tensor& qkv, Tensor& z,
+                     cudaStream_t stream) {
+    constexpr std::int32_t kValueRows = 6144;
+    using Schedule                    = GemmCfg<64, 128, 64, 64, 16, 2, 1, false, true, true>;
+    const RowSplitGroupedMmaJob qk         = make_job(qk_weight, 0, qk_weight.n, qkv, 0);
+    const RowSplitGroupedMmaJob value      = make_job(value_z_weight, 0, kValueRows, qkv, qk_weight.n);
+    const RowSplitGroupedMmaJob output_gate =
+        make_job(value_z_weight, kValueRows, kValueRows, z, 0);
+    RowSplitGroupedMmaJob empty{};
+    const int tiles = div_up(qk.n, Schedule::BM) + div_up(value.n, Schedule::BM) +
+                      div_up(output_gate.n, Schedule::BM);
+    const int cols = x_q.ne[1];
+    const dim3 grid(static_cast<unsigned>(tiles),
+                    static_cast<unsigned>(div_up(cols, Schedule::BN)));
+
+    if (full) {
+        rowsplit_grouped_mma_i8_kernel<Schedule, true, RowSplitGroupedMmaCodec::Mixed, 4>
+            <<<grid, Schedule::THREADS, 0, stream>>>(static_cast<const std::int8_t*>(x_q.data),
+                                                     static_cast<const std::uint16_t*>(x_scale.data),
+                                                     qk, value, output_gate, empty, x_q.ne[0], cols,
+                                                     x_q.ne[0]);
+    } else {
+        rowsplit_grouped_mma_i8_kernel<Schedule, false, RowSplitGroupedMmaCodec::Mixed, 4>
+            <<<grid, Schedule::THREADS, 0, stream>>>(static_cast<const std::int8_t*>(x_q.data),
+                                                     static_cast<const std::uint16_t*>(x_scale.data),
+                                                     qk, value, output_gate, empty, x_q.ne[0], cols,
+                                                     x_q.ne[0]);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace
+
+void q4_q5_gdn_input_grouped_mma_i8_launch(const Tensor& x_q, const Tensor& x_scale,
+                                           const Weight& qk_weight, const Weight& value_z_weight,
+                                           Tensor& qkv, Tensor& z, cudaStream_t stream) {
+    constexpr std::int32_t kTileCols = 128;
+    const bool full                  = (x_q.ne[1] % kTileCols) == 0;
+    for_each_token_slice(x_q.ne[1], kTileCols, [&](std::int32_t offset, std::int32_t count) {
+        const Tensor xq_slice    = x_q.slice(1, offset, count);
+        const Tensor xs_slice    = x_scale.slice(1, offset, count);
+        Tensor qkv_slice         = qkv.slice(1, offset, count);
+        Tensor z_slice           = z.slice(1, offset, count);
+        launch_slice_i8(full, xq_slice, xs_slice, qk_weight, value_z_weight, qkv_slice, z_slice,
+                        stream);
+    });
+}
 
 void q4_q5_gdn_input_grouped_mma_launch(const Tensor& x, const Weight& qk_weight,
                                         const Weight& value_z_weight, Tensor& qkv, Tensor& z,

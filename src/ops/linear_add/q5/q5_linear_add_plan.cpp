@@ -2,6 +2,11 @@
 
 #include "ops/linear_add/q5/q5_linear_add_kernels.h"
 
+#include "ops/common/act_quant_i8.cuh"
+
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+
 #include <array>
 #include <limits>
 #include <stdexcept>
@@ -31,6 +36,10 @@ struct RouteSpec {
     Q5LinearAddScheduleId schedule;
 };
 
+constexpr bool is_i8_route(Q5LinearAddScheduleId id) {
+    return id == Q5LinearAddScheduleId::MmaResidualI8R64C128;
+}
+
 constexpr std::array<SupportSpec, 2> kSupports{{
     {5120, 6144, 6144},
     {5120, 17408, 17408},
@@ -42,7 +51,7 @@ constexpr std::array<RouteSpec, 6> kK6144Routes{{
     {{14, 32}, Q5LinearAddScheduleId::MmaResidualR64C16},
     {{33, 48}, Q5LinearAddScheduleId::MmaResidualR64C24},
     {{49, 128}, Q5LinearAddScheduleId::MmaResidualR64C64},
-    {{129, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128},
+    {{129, kAnyCols}, Q5LinearAddScheduleId::MmaResidualI8R64C128},
 }};
 
 constexpr std::array<RouteSpec, 6> kK17408Routes{{
@@ -51,7 +60,7 @@ constexpr std::array<RouteSpec, 6> kK17408Routes{{
     {{17, 32}, Q5LinearAddScheduleId::MmaResidualR64C16},
     {{33, 48}, Q5LinearAddScheduleId::MmaResidualR64C24},
     {{49, 128}, Q5LinearAddScheduleId::MmaResidualR64C64},
-    {{129, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128},
+    {{129, kAnyCols}, Q5LinearAddScheduleId::MmaResidualI8R64C128},
 }};
 
 template <std::size_t N>
@@ -94,6 +103,8 @@ const char* q5_linear_add_schedule_name(Q5LinearAddScheduleId schedule) noexcept
         return "linear_add.q5.mma.r64.c64.cta_collective_residual";
     case Q5LinearAddScheduleId::MmaResidualR64C128:
         return "linear_add.q5.mma.r64.c128.cta_collective_residual";
+    case Q5LinearAddScheduleId::MmaResidualI8R64C128:
+        return "linear_add.q5.mma.i8.r64.c128.cta_collective_residual";
     }
     return "linear_add.q5.unknown";
 }
@@ -109,7 +120,14 @@ Q5LinearAddPlan q5_linear_add_resolve_plan(const Q5LinearAddProblem& problem) {
 
     const auto resolve_from = [&](const auto& routes) -> Q5LinearAddPlan {
         for (const RouteSpec& route : routes) {
-            if (route.cols.contains(problem.cols)) { return {route.schedule, 0}; }
+            if (!route.cols.contains(problem.cols)) { continue; }
+            std::size_t bytes = 0;
+            if (is_i8_route(route.schedule)) {
+                bytes = static_cast<std::size_t>(problem.cols) * static_cast<std::size_t>(problem.k) +
+                        static_cast<std::size_t>(problem.cols) *
+                            static_cast<std::size_t>(problem.padded_k / 64) * 2;
+            }
+            return {route.schedule, bytes};
         }
         throw std::logic_error("q5 linear_add: admitted problem has no covering route");
     };
@@ -125,7 +143,20 @@ std::size_t q5_linear_add_capacity_workspace_bytes(std::int32_t rows, std::int32
     (void)q5_linear_add_resolve_plan({rows, k, padded_k, min_cols});
     (void)q5_linear_add_resolve_plan({rows, k, padded_k, max_cols});
 
-    return 0;
+    std::size_t maximum = 0;
+    for (const RouteSpec& route : kK6144Routes) {
+        if (!is_i8_route(route.schedule) || route.cols.last < min_cols || route.cols.first > max_cols) {
+            continue;
+        }
+        maximum = std::max(maximum, q5_linear_add_resolve_plan({rows, k, padded_k, max_cols}).workspace_bytes);
+    }
+    for (const RouteSpec& route : kK17408Routes) {
+        if (!is_i8_route(route.schedule) || route.cols.last < min_cols || route.cols.first > max_cols) {
+            continue;
+        }
+        maximum = std::max(maximum, q5_linear_add_resolve_plan({rows, k, padded_k, max_cols}).workspace_bytes);
+    }
+    return maximum;
 }
 
 void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, const Weight& w,
@@ -156,6 +187,17 @@ void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, co
     case Q5LinearAddScheduleId::MmaResidualR64C128:
         q5_linear_add_mma_r64_c128_launch(x, w, residual_out, stream);
         return;
+    case Q5LinearAddScheduleId::MmaResidualI8R64C128: {
+        const std::int32_t k = x.ne[0];
+        const std::int32_t t = x.ne[1];
+        auto scratch_scope   = ws.scope();
+        Tensor x_q           = ws.alloc(DType::I8, {k, t});
+        Tensor x_scale       = ws.alloc(DType::FP16, {w.padded_shape[1] / 64, t});
+        act_quant_i8_launch(static_cast<const __nv_bfloat16*>(x.data), static_cast<std::int8_t*>(x_q.data),
+                            static_cast<__half*>(x_scale.data), k, t, stream);
+        q5_linear_add_mma_i8_r64_c128_launch(x_q, x_scale, w, residual_out, stream);
+        return;
+    }
     }
     throw std::logic_error("q5 linear_add: unknown schedule");
 }

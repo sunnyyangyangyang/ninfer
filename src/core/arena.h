@@ -43,6 +43,9 @@ class DeviceArena {
 public:
     class Scope {
     public:
+        // Inactive scope (arena_ == nullptr) so callers with an optional arena can keep
+        // one uniform Scope variable; the destructor is a no-op in that case.
+        Scope() noexcept = default;
         ~Scope() noexcept;
 
         Scope(const Scope&)            = delete;

@@ -4,6 +4,7 @@
 #include "ops/common/math.h"
 #include "ops/common/token_slices.h"
 #include "ops/linear/q5/q5_rowsplit_gemm_mma.cuh"
+#include "ops/linear/q5/q5_rowsplit_gemm_mma_i8.cuh"
 
 #include <cuda_bf16.h>
 
@@ -24,6 +25,49 @@ using MmaR64C64Schedule =
 using MmaR64C128Schedule =
     Q5RowSplitMmaGemmSchedule<64, 128, 64, 64, 32, 2, 1, Q5FragmentPipeline::Serial, Cache::cg,
                               Cache::cg, Q5ScaleLoad::Pair32>;
+using I8MmaR64C128Schedule =
+    Q5RowSplitMmaGemmSchedule<64, 128, 64, 64, 32, 2, 1, Q5FragmentPipeline::Serial, Cache::cg,
+                              Cache::cg, Q5ScaleLoad::Pair32>;
+
+template <class Schedule, bool Full>
+void launch_kernel_i8(const Tensor& x_q, const Tensor& x_scale, const Weight& w,
+                      Tensor& residual_out, cudaStream_t stream) {
+    const auto* xqp   = static_cast<const std::int8_t*>(x_q.data);
+    const auto* xsp   = static_cast<const std::uint16_t*>(x_scale.data);
+    const auto* codes = static_cast<const std::uint8_t*>(w.qdata);
+    const auto* high  = static_cast<const std::uint8_t*>(w.qhigh);
+    const auto* scales = static_cast<const std::uint8_t*>(w.scales);
+    auto* out         = static_cast<__nv_bfloat16*>(residual_out.data);
+    const std::int32_t rows = residual_out.ne[0];
+    const std::int32_t k    = x_q.ne[0];
+    const std::int32_t cols = x_q.ne[1];
+    const std::int32_t padded_k = w.padded_shape[1];
+    const dim3 grid(static_cast<unsigned>(div_up(rows, Schedule::kBlockRows)),
+                    static_cast<unsigned>(div_up(cols, Schedule::kBlockCols)), 1u);
+
+    q5_rowsplit_gemm_mma_i8_kernel<Schedule, Full>
+        <<<grid, Schedule::kThreads, 0, stream>>>(xqp, xsp, codes, high, scales, out, rows, k,
+                                                  cols, padded_k);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <class Schedule>
+void launch_route_i8(const Tensor& x_q, const Tensor& x_scale, const Weight& w,
+                     Tensor& residual_out, cudaStream_t stream) {
+    const bool full = (w.n % 64) == 0 && (x_q.ne[1] % Schedule::kBlockCols) == 0 &&
+                      w.k == w.padded_shape[1] && (w.k % 64) == 0;
+    for_each_token_slice(x_q.ne[1], Schedule::kBlockCols,
+                         [&](std::int32_t offset, std::int32_t count) {
+                             const Tensor xq_slice      = x_q.slice(1, offset, count);
+                             const Tensor xs_slice      = x_scale.slice(1, offset, count);
+                             Tensor residual_slice      = residual_out.slice(1, offset, count);
+                             if (full) {
+                                 launch_kernel_i8<Schedule, true>(xq_slice, xs_slice, w, residual_slice, stream);
+                             } else {
+                                 launch_kernel_i8<Schedule, false>(xq_slice, xs_slice, w, residual_slice, stream);
+                             }
+                         });
+}
 
 template <class Schedule, bool Full>
 void launch_kernel(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
@@ -81,6 +125,13 @@ void q5_linear_add_mma_r64_c64_launch(const Tensor& x, const Weight& w, Tensor& 
 void q5_linear_add_mma_r64_c128_launch(const Tensor& x, const Weight& w, Tensor& residual_out,
                                        cudaStream_t stream) {
     launch_route<MmaR64C128Schedule>(x, w, residual_out, stream);
+}
+
+
+
+void q5_linear_add_mma_i8_r64_c128_launch(const Tensor& x_q, const Tensor& x_scale, const Weight& w,
+                                          Tensor& residual_out, cudaStream_t stream) {
+    launch_route_i8<I8MmaR64C128Schedule>(x_q, x_scale, w, residual_out, stream);
 }
 
 } // namespace ninfer::ops::detail

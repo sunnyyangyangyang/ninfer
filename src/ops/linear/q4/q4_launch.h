@@ -34,5 +34,6 @@ void launch_q4_mma_r64_c120_partial(const Tensor& x, const Weight& w, Tensor& ou
                                     cudaStream_t stream);
 void launch_q4_mma_r64_c120(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
 void launch_q4_mma_r64_c128(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
+void launch_q4_mma_i8_r64_c128(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

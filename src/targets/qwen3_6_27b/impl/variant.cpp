@@ -345,7 +345,8 @@ std::size_t Variant::attention_projection_workspace_capacity_bytes(WeightsProfil
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
     case WeightsProfile::Qwen38GroupwiseInt:
-        return 0;
+        return static_cast<std::size_t>(last) * static_cast<std::size_t>(TextConfig::hidden) +
+               static_cast<std::size_t>(last) * static_cast<std::size_t>(TextConfig::hidden / 64) * 2;
     case WeightsProfile::Qwen36Nvfp4:
         return ops::attn_input_proj_workspace_capacity_bytes(
             QType::NVFP4, 14336, TextConfig::hidden, kNvfp4TextPolicy, first, last);
@@ -385,7 +386,8 @@ std::size_t Variant::gdn_input_projection_workspace_capacity_bytes(WeightsProfil
     switch (weights_profile) {
     case WeightsProfile::Qwen36GroupwiseInt:
     case WeightsProfile::Qwen38GroupwiseInt:
-        return 0;
+        return static_cast<std::size_t>(last) * static_cast<std::size_t>(TextConfig::hidden) +
+               static_cast<std::size_t>(last) * static_cast<std::size_t>(TextConfig::hidden / 64) * 2;
     case WeightsProfile::Qwen36Nvfp4:
         return ops::gdn_input_proj_workspace_capacity_bytes(QType::NVFP4, 16384, TextConfig::hidden,
                                                             kNvfp4TextPolicy, first, last);

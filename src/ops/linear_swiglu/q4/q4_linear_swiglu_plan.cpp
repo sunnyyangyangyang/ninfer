@@ -1,6 +1,10 @@
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
 
 #include "ninfer/ops/linear.h"
+#include "ops/common/act_quant_i8.cuh"
+
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include "ninfer/ops/silu_mul.h"
 #include "core/layout.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_kernels.h"
@@ -37,11 +41,11 @@ constexpr std::array<RouteSpec, 10> kRoutes{{
     {{33, 40}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C40},
     {{41, 48}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C48},
     {{49, 128}, Q4LinearSwiGluScheduleId::Materialized},
-    {{129, 256}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128},
+    {{129, 256}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128I8},
     {{257, 384}, Q4LinearSwiGluScheduleId::Materialized},
-    {{385, 512}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128},
+    {{385, 512}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128I8},
     {{513, 640}, Q4LinearSwiGluScheduleId::Materialized},
-    {{641, kAnyCols}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128},
+    {{641, kAnyCols}, Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128I8},
 }};
 
 constexpr bool catalog_is_closed() noexcept {
@@ -73,6 +77,11 @@ std::size_t materialized_workspace_bytes(std::int32_t rows, std::int32_t cols) {
     return layout.peak_bytes(1);
 }
 
+std::size_t act_quant_workspace_bytes(std::int32_t k, std::int32_t cols) {
+    return static_cast<std::size_t>(cols) * static_cast<std::size_t>(k) +
+           static_cast<std::size_t>(cols) * static_cast<std::size_t>(k / 64) * 2;
+}
+
 } // namespace
 
 const char* q4_linear_swiglu_schedule_name(Q4LinearSwiGluScheduleId schedule) noexcept {
@@ -89,6 +98,8 @@ const char* q4_linear_swiglu_schedule_name(Q4LinearSwiGluScheduleId schedule) no
         return "linear_swiglu.q4.materialized";
     case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128:
         return "linear_swiglu.q4.mma.split_half_pair.r32.c128";
+    case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128I8:
+        return "linear_swiglu.q4.mma.split_half_pair.i8.r32.c128";
     }
     return "linear_swiglu.q4.unknown";
 }
@@ -119,6 +130,9 @@ Q4LinearSwiGluPlan q4_linear_swiglu_resolve_plan(const Q4LinearSwiGluProblem& pr
             plan.workspace_bytes = materialized_workspace_bytes(problem.gate_up_rows, problem.cols);
             return plan;
         case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128:
+            return plan;
+        case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128I8:
+            plan.workspace_bytes = act_quant_workspace_bytes(problem.k, problem.cols);
             return plan;
         }
     }
@@ -178,6 +192,16 @@ void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor&
     case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128:
         q4_linear_swiglu_mma_split_half_pair_r32_c128_launch(x, w, out, stream);
         return;
+    case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C128I8: {
+        auto scratch_scope = ws.scope();
+        Tensor x_q         = ws.alloc(DType::I8, {problem.k, problem.cols});
+        Tensor x_scale     = ws.alloc(DType::FP16, {problem.k / 64, problem.cols});
+        act_quant_i8_launch(static_cast<const __nv_bfloat16*>(x.data),
+                            static_cast<std::int8_t*>(x_q.data),
+                            static_cast<__half*>(x_scale.data), problem.k, problem.cols, stream);
+        q4_linear_swiglu_mma_split_half_pair_r32_c128_i8_launch(x_q, x_scale, w, out, stream);
+        return;
+    }
     }
     throw std::logic_error("q4 linear_swiglu: unknown schedule");
 }

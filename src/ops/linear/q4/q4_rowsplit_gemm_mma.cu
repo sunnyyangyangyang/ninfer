@@ -1,4 +1,6 @@
 #include "ops/linear/q4/q4_rowsplit_gemm_mma.cuh"
+#include "ops/linear/q4/q4_rowsplit_gemm_mma_i8.cuh"
+#include "ops/common/act_quant_i8.cuh"
 
 #include "core/device.h"
 #include "ops/common/math.h"
@@ -8,6 +10,30 @@
 #include <cstdint>
 
 namespace ninfer::ops::detail {
+namespace {
+
+using I8MmaR64C128Schedule =
+    Q4RowSplitMmaGemmSchedule<64, 128, 64, 64, 32, 2, 1, Q4FragmentPipeline::Serial, Cache::cg,
+                              Cache::cg, Q4ScaleLoad::Pair32>;
+
+std::int8_t* i8_slice_xq() {
+    static std::int8_t* p = nullptr;
+    if (p == nullptr) {
+        CUDA_CHECK(cudaMalloc(&p, static_cast<std::size_t>(5120) * 4096));
+    }
+    return p;
+}
+
+__half* i8_slice_xs() {
+    static __half* p = nullptr;
+    if (p == nullptr) {
+        CUDA_CHECK(cudaMalloc(&p, static_cast<std::size_t>(5120 / 64) * 4096 * 2));
+    }
+    return p;
+}
+
+} // namespace
+
 namespace {
 
 using Q4MmaR64C32Schedule =
@@ -159,6 +185,42 @@ void launch_q4_mma_r64_c120(const Tensor& x, const Weight& w, Tensor& out, cudaS
 
 void launch_q4_mma_r64_c128(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     launch_route<Q4MmaR64C128Schedule>(x, w, out, stream);
+}
+
+
+
+void launch_q4_mma_i8_r64_c128(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+    const std::int32_t k = x.ne[0];
+    const std::int32_t t = x.ne[1];
+    if (k != 5120) { throw std::invalid_argument("q4 i8 rowsplit: k must be 5120"); }
+    auto* xq  = i8_slice_xq();
+    auto* xs  = i8_slice_xs();
+    const auto* codes  = static_cast<const std::uint8_t*>(w.qdata);
+    const auto* scales = static_cast<const std::uint8_t*>(w.scales);
+    auto* outp         = static_cast<__nv_bfloat16*>(out.data);
+    const std::int32_t rows = w.n;
+    const std::int32_t padded_k = w.padded_shape[1];
+    const std::int32_t slice = 4096;
+    for (std::int32_t off = 0; off < t; off += slice) {
+        const std::int32_t cnt = std::min(slice, t - off);
+        act_quant_i8_launch(static_cast<const __nv_bfloat16*>(x.data) + off * k, xq,
+                            static_cast<__half*>(xs), k, cnt, stream);
+        const bool full = (cnt % 128) == 0;
+        const dim3 grid(static_cast<unsigned>(div_up(rows, 64)),
+                        static_cast<unsigned>(div_up(cnt, 128)), 1u);
+        if (full) {
+            q4_rowsplit_gemm_mma_i8_kernel<I8MmaR64C128Schedule, true>
+                <<<grid, I8MmaR64C128Schedule::kThreads, 0, stream>>>(
+                    xq, reinterpret_cast<const std::uint16_t*>(xs), codes, scales,
+                    outp + static_cast<std::int64_t>(off) * rows, rows, k, cnt, padded_k);
+        } else {
+            q4_rowsplit_gemm_mma_i8_kernel<I8MmaR64C128Schedule, false>
+                <<<grid, I8MmaR64C128Schedule::kThreads, 0, stream>>>(
+                    xq, reinterpret_cast<const std::uint16_t*>(xs), codes, scales,
+                    outp + static_cast<std::int64_t>(off) * rows, rows, k, cnt, padded_k);
+        }
+    }
+    CUDA_CHECK(cudaGetLastError());
 }
 
 } // namespace ninfer::ops::detail
