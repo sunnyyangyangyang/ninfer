@@ -2,12 +2,12 @@
 
 > Selected checkpoints. Maximum single-GPU inference performance.
 
-NInfer is a from-scratch C++/CUDA inference engine for explicitly registered Qwen checkpoints on a
+NInfer is a from-scratch C++/CUDA inference engine for Qwen3.5 Dense and MoE architectures on a
 single NVIDIA GeForce RTX 5090. It runs text, image, and video prompts through a local CLI or
 OpenAI-/Anthropic-compatible HTTP APIs. The runtime is deliberately specialized: one GPU, one
 resident model, and a startup-fixed capacity of one to eight active requests.
 
-NInfer supports five artifact identities. The quick-start commands use Qwen3.8-27B NVFP4.
+Five official artifacts are available. The quick-start commands use Qwen3.8-27B NVFP4.
 
 | Model | Weights | Artifact | Download and model card |
 |---|---|---|---|
@@ -17,15 +17,22 @@ NInfer supports five artifact identities. The quick-start commands use Qwen3.8-2
 | Qwen3.8-27B | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) |
 | Qwen3.6-35B-A3B | `groupwise-int` | `qwen3_6_35b_a3b.ninfer` | [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) |
 
-The artifact identity fixes the exact model and weight profile. Every artifact also embeds the
-tokenizer, chat template, and media frontend resources required by its registered target.
+Each v3 `.ninfer` artifact carries model configuration, encoded weights, logical bindings and
+frontend resources. Runtime execution uses those facts with the implemented model and Op
+capabilities. You can also [convert your own weights](docs/weight-conversion.md), reuse an official
+recipe or choose another supported mixture of formats.
+
+The current engine requires v3 artifacts. Existing official v2 downloads can be
+[upgraded locally](docs/weight-conversion.md#upgrade-an-existing-v2-artifact) without downloading
+the weights again.
 
 ## Quick start
 
-NInfer requires 64-bit Linux, an NVIDIA GeForce RTX 5090, CUDA Toolkit 13.1 or newer, CMake 3.28 or
-newer, a C++20 host compiler, Ninja, `pkg-config`, FFmpeg development libraries
-(`libavformat >= 60`, `libavcodec >= 60`, `libavutil >= 58`, and `libswscale >= 7`), and
-`libcurl >= 7.85`. The build rejects CUDA architectures other than `sm_120a`.
+NInfer requires 64-bit Linux, an NVIDIA GeForce RTX 5090, a CUDA toolkit supporting `sm_120a`,
+CMake 3.28 or newer, a C++20 host compiler, Ninja, `pkg-config`, FFmpeg development libraries
+(`libavformat`, `libavcodec`, `libavutil`, and `libswscale`), and `libcurl >= 7.85`.
+CUDA 13.1 is the validated development toolkit; CMake does not impose a CUDA version floor.
+The build rejects CUDA architectures other than `sm_120a`.
 
 Build the product binaries:
 
@@ -37,8 +44,15 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-Tests, benchmarks, and maintainer tools are excluded from the default build. There is no install
-target or packaged binary distribution; run NInfer from its source build tree.
+Tests and benchmarks are excluded from the default build. `cmake --preset release` configures
+the same product build; `cmake --preset dev` also enables tests and benchmarks and finds a
+Python 3 interpreter. Both presets use `build/` and explicitly reset the build options.
+Machine-specific compiler and Python paths belong in the ignored `CMakeUserPresets.json`.
+See [build organization and configuration](docs/maintainer/build-system.md) for details.
+
+There is no install target or packaged binary distribution; run NInfer from its source build tree.
+Python tools run independently of CMake; the standalone HBM probe has its own
+[build command](tools/README.md#standalone-hbm-probe).
 
 Download the artifact used by this example with the Hugging Face CLI:
 
@@ -206,7 +220,7 @@ docker run --rm \
 
 ## Capabilities and limits
 
-All registered model IDs support:
+The official artifacts provide the following capabilities, with optional components enabled at startup:
 
 - text generation with thinking and non-thinking prompt modes;
 - image, multi-image, video, and mixed multimodal messages;
@@ -231,7 +245,7 @@ The product boundary remains intentionally small:
 - no request preemption, priority/QoS, active-request swapping, weight offload, multi-GPU, or
   distributed serving;
 - one shared startup-fixed KV pool across active requests and retained prefixes;
-- no runtime model discovery or unregistered checkpoint fallback;
+- model architectures and format/shape combinations use explicitly implemented native paths;
 - parsed tool calls are returned to the client; NInfer does not execute tools;
 - the in-tree C++ headers are not distributed as an installed SDK.
 
@@ -247,6 +261,7 @@ capacities remain fixed for the process lifetime.
 - [HTTP serving](docs/serving.md)
 - [Performance](docs/performance.md)
 - [Perplexity evaluation](docs/perplexity.md)
+- [Weight conversion and custom recipes](docs/weight-conversion.md)
 - [Resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)
 - [Serve TTFT benchmark](tools/bench/ttft/)
 - [CLI examples](examples/cli/)
